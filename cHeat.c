@@ -33,7 +33,7 @@ static unsigned W, H, BPP, LINE;
 static struct termios oldt;
 static int raw_on;
 static Ap aps[MAXAP];
-static int nap, auto_on, menu_i = -1, item_i, list_top;
+static int nap, auto_on, menu_i = -1, item_i, list_top, sel = -1;
 static char note[80] = "tab menu   arrows view   q quit";
 static double yaw = 0.7, pitch = 0.55, zoom = 88;
 static uint16_t C_BG, C_AXIS, C_TXT, C_DIM, C_HI, C_MENU, C_SEL;
@@ -320,6 +320,8 @@ static void scan_aps(void)
     }
     pclose(p);
     qsort(aps, (size_t)nap, sizeof(Ap), cmp_sig);
+    if (sel >= nap)
+        sel = nap ? 0 : -1;
 }
 
 static double chan_x(int ch)
@@ -349,9 +351,9 @@ static void quadf(int sx[4], int sy[4], uint16_t c)
     tri(sx[0], sy[0], sx[2], sy[2], sx[3], sy[3], c);
 }
 
-static void bar3(double x, double y, double h, uint16_t c)
+static void bar3(double x, double y, double h, uint16_t c, int hi)
 {
-    double r = 0.13;
+    double r = hi ? 0.18 : 0.13;
     double X[4], Y[4], Z[4];
     int sx[4], sy[4];
     /* top */
@@ -377,6 +379,14 @@ static void bar3(double x, double y, double h, uint16_t c)
         quadf(sx, sy, shade(c, 55));
     edge(x - r, y - r, h, x + r, y - r, h, shade(c, 40));
     edge(x + r, y - r, h, x + r, y + r, h, shade(c, 40));
+    if (hi) {
+        double R = r + 0.10;
+        edge(x - R, y - R, 0, x + R, y - R, 0, C_SEL);
+        edge(x + R, y - R, 0, x + R, y + R, 0, C_SEL);
+        edge(x + R, y + R, 0, x - R, y + R, 0, C_SEL);
+        edge(x - R, y + R, 0, x - R, y - R, 0, C_SEL);
+        edge(x, y, h, x, y, h + 0.35, C_SEL);
+    }
 }
 
 typedef struct {
@@ -442,7 +452,8 @@ static void render(const char *note)
                 z = 0.10;
             if (z > 2.2)
                 z = 2.2;
-            bar3(x, y, z, heat(aps[i].sig));
+            bar3(x, y, z, heat(aps[i].sig),
+                 i == sel || (menu_i == 2 && i == item_i));
         }
     }
 
@@ -558,6 +569,7 @@ static void do_item(void)
             zoom /= 1.12;
         snprintf(note, sizeof note, "view");
     } else if (menu_i == 2 && nap) {
+        sel = item_i;
         snprintf(note, sizeof note, "%s  %+d dB  ch%d", aps[item_i].ssid, aps[item_i].sig, aps[item_i].chan);
     }
 }
