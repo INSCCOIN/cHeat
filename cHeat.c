@@ -33,9 +33,11 @@ static unsigned W, H, BPP, LINE;
 static struct termios oldt;
 static int raw_on;
 static Ap aps[MAXAP];
-static int nap;
+static int nap, auto_on, menu_i = -1, item_i, list_top;
+static char note[80] = "tab menu   arrows view   q quit";
 static double yaw = 0.7, pitch = 0.55, zoom = 88;
-static uint16_t C_BG, C_AXIS, C_TXT, C_DIM, C_HI;
+static uint16_t C_BG, C_AXIS, C_TXT, C_DIM, C_HI, C_MENU, C_SEL;
+static void draw_chrome(void);
 
 static uint16_t rgb565(int r, int g, int b)
 {
@@ -398,8 +400,8 @@ static void render(const char *note)
     char line[80];
     Ord ord[MAXAP];
     clear_fb(C_BG);
-    fill_rect(0, 0, (int)W, 14, C_DIM);
-    fill_rect(0, (int)H - 30, (int)W, 30, C_DIM);
+    fill_rect(0, 0, (int)W, 16, C_DIM);
+    fill_rect(0, (int)H - 14, (int)W, 14, C_DIM);
 
     for (i = -3; i <= 3; i++)
         edge(-2.8, i * 0.45, 0, 3.2, i * 0.45, 0, C_AXIS);
@@ -444,23 +446,120 @@ static void render(const char *note)
         }
     }
 
-    text(4, 4, "cHeat", C_HI);
-    snprintf(line, sizeof line, "%d AP", nap);
-    text((int)W - 6 * (int)strlen(line) - 6, 4, line, C_TXT);
-    /* legend */
-    for (i = 0; i < 8; i++)
-        fill_rect(80 + i * 10, 4, 9, 6, heat(-90 + i * 8));
-    text(80, 4, "", C_TXT);
+    draw_chrome();
+}
 
-    text(4, (int)H - 26, note, C_TXT);
-    for (i = 0; i < nap && i < 3; i++) {
-        snprintf(line, sizeof line, "%d %-10.10s %+ddB ch%d", i + 1, aps[i].ssid, aps[i].sig, aps[i].chan);
-        text(4 + (i % 1) * 0, (int)H - 18 + i * 8, line, heat(aps[i].sig));
-        if (i >= 2)
-            break;
+static const char *MENUS[] = {"Scan", "View", "List", "Help"};
+#define NMENU 4
+
+static int menu_x(int m)
+{
+    return 4 + m * 56;
+}
+
+static int nitems(void)
+{
+    if (menu_i == 0)
+        return 3;
+    if (menu_i == 1)
+        return 3;
+    if (menu_i == 2)
+        return nap > 0 ? nap : 1;
+    if (menu_i == 3)
+        return 4;
+    return 0;
+}
+
+static void item_text(int i, char *out, size_t n)
+{
+    if (menu_i == 0) {
+        const char *s[] = {"Scan now", "Radio rescan", auto_on ? "Auto: ON" : "Auto: OFF"};
+        snprintf(out, n, "%s", s[i]);
+    } else if (menu_i == 1) {
+        const char *s[] = {"Reset camera", "Zoom in", "Zoom out"};
+        snprintf(out, n, "%s", s[i]);
+    } else if (menu_i == 2) {
+        if (!nap)
+            snprintf(out, n, "(no APs)");
+        else
+            snprintf(out, n, "%-12.12s %+4ddB ch%-3d", aps[i].ssid, aps[i].sig, aps[i].chan);
+    } else {
+        const char *s[] = {"Tab next menu", "Up/Dn pick", "Enter do", "Esc close"};
+        snprintf(out, n, "%s", s[i]);
     }
-    if (nap > 3)
-        ; /* top 3 only in footer */
+}
+
+static void draw_chrome(void)
+{
+    int m, i, mx, my, mw, mh, vis, n;
+    char line[64];
+    for (m = 0; m < NMENU; m++) {
+        uint16_t c = (menu_i == m) ? C_SEL : C_TXT;
+        text(menu_x(m), 5, MENUS[m], c);
+        if (menu_i == m)
+            fill_rect(menu_x(m) - 2, 15, 50, 2, C_HI);
+    }
+    snprintf(line, sizeof line, "%d", nap);
+    text((int)W - 24, 5, line, C_HI);
+    for (i = 0; i < 6; i++)
+        fill_rect((int)W - 70 + i * 7, 5, 6, 6, heat(-90 + i * 10));
+
+    text(4, (int)H - 10, note, C_TXT);
+
+    if (menu_i < 0)
+        return;
+    n = nitems();
+    if (item_i >= n)
+        item_i = n ? n - 1 : 0;
+    if (item_i < 0)
+        item_i = 0;
+    vis = 8;
+    if (menu_i == 2)
+        vis = 10;
+    if (item_i < list_top)
+        list_top = item_i;
+    if (item_i >= list_top + vis)
+        list_top = item_i - vis + 1;
+    if (list_top < 0)
+        list_top = 0;
+    mx = menu_x(menu_i);
+    my = 18;
+    mw = menu_i == 2 ? 200 : 110;
+    if (mx + mw > (int)W - 2)
+        mx = (int)W - mw - 2;
+    mh = 10 + (n < vis ? n : vis) * 10;
+    fill_rect(mx, my, mw, mh, C_MENU);
+    for (i = 0; i < vis && list_top + i < n; i++) {
+        item_text(list_top + i, line, sizeof line);
+        text(mx + 4, my + 4 + i * 10, line,
+             list_top + i == item_i ? C_SEL : (menu_i == 2 && nap ? heat(aps[list_top + i].sig) : C_TXT));
+    }
+}
+
+static void do_item(void)
+{
+    if (menu_i == 0) {
+        if (item_i == 0)
+            scan_aps();
+        else if (item_i == 1) {
+            (void)!system("nmcli -w 8 device wifi rescan >/dev/null 2>&1");
+            scan_aps();
+        } else
+            auto_on ^= 1;
+        snprintf(note, sizeof note, auto_on ? "auto on  %d ap" : "scanned %d", nap);
+    } else if (menu_i == 1) {
+        if (item_i == 0) {
+            yaw = 0.7;
+            pitch = 0.55;
+            zoom = 88;
+        } else if (item_i == 1)
+            zoom *= 1.12;
+        else
+            zoom /= 1.12;
+        snprintf(note, sizeof note, "view");
+    } else if (menu_i == 2 && nap) {
+        snprintf(note, sizeof note, "%s  %+d dB  ch%d", aps[item_i].ssid, aps[item_i].sig, aps[item_i].chan);
+    }
 }
 
 static void raw(int on)
@@ -502,8 +601,7 @@ static int fb_open(void)
 
 int main(void)
 {
-    char note[64] = "s scan  arrows  q";
-    int run = 1, auto_on = 0;
+    int run = 1;
     if (fb_open() < 0) {
         fprintf(stderr, "cHeat: /dev/fb0: need the deck screen\n");
         return 1;
@@ -511,8 +609,10 @@ int main(void)
     C_BG = rgb565(8, 10, 14);
     C_AXIS = rgb565(40, 48, 58);
     C_TXT = rgb565(200, 210, 220);
-    C_DIM = rgb565(20, 24, 30);
+    C_DIM = rgb565(18, 22, 28);
     C_HI = rgb565(80, 220, 140);
+    C_MENU = rgb565(16, 22, 32);
+    C_SEL = rgb565(255, 220, 80);
     raw(1);
     scan_aps();
     render(note);
@@ -533,6 +633,12 @@ int main(void)
             }
             continue;
         }
+        if (ch == '\t') {
+            menu_i = (menu_i + 1) % NMENU;
+            item_i = list_top = 0;
+            render(note);
+            continue;
+        }
         if (ch == 0x1b) {
             unsigned char seq[8] = {0};
             struct timeval t2 = {0, 80000};
@@ -540,30 +646,55 @@ int main(void)
             FD_SET(0, &rf);
             if (select(1, &rf, NULL, NULL, &t2) > 0)
                 read(0, seq, 6);
-            if (seq[0] == '[' && seq[1] == 'A')
-                pitch -= 0.10;
-            else if (seq[0] == '[' && seq[1] == 'B')
-                pitch += 0.10;
-            else if (seq[0] == '[' && seq[1] == 'C')
-                yaw += 0.12;
-            else if (seq[0] == '[' && seq[1] == 'D')
-                yaw -= 0.12;
-            if (pitch > 1.2)
-                pitch = 1.2;
-            if (pitch < 0.15)
-                pitch = 0.15;
+            if (seq[0] == 0) {
+                menu_i = -1;
+                render(note);
+                continue;
+            }
+            if (seq[0] == '[' && seq[1] == 'Z') {
+                menu_i = menu_i <= 0 ? NMENU - 1 : menu_i - 1;
+                item_i = list_top = 0;
+            } else if (menu_i >= 0 && seq[0] == '[' && seq[1] == 'A') {
+                if (item_i > 0)
+                    item_i--;
+            } else if (menu_i >= 0 && seq[0] == '[' && seq[1] == 'B') {
+                if (item_i + 1 < nitems())
+                    item_i++;
+            } else if (menu_i >= 0 && seq[0] == '[' && seq[1] == 'C') {
+                menu_i = (menu_i + 1) % NMENU;
+                item_i = list_top = 0;
+            } else if (menu_i >= 0 && seq[0] == '[' && seq[1] == 'D') {
+                menu_i = menu_i <= 0 ? NMENU - 1 : menu_i - 1;
+                item_i = list_top = 0;
+            } else if (menu_i < 0 && seq[0] == '[') {
+                if (seq[1] == 'A')
+                    pitch -= 0.10;
+                else if (seq[1] == 'B')
+                    pitch += 0.10;
+                else if (seq[1] == 'C')
+                    yaw += 0.12;
+                else if (seq[1] == 'D')
+                    yaw -= 0.12;
+                if (pitch > 1.2)
+                    pitch = 1.2;
+                if (pitch < 0.15)
+                    pitch = 0.15;
+            } else
+                menu_i = -1;
             render(note);
             continue;
         }
         if (ch == 'q')
             run = 0;
-        else if (ch == 's' || ch == 'S') {
+        else if (ch == 10 || ch == 13) {
+            if (menu_i < 0)
+                menu_i = 0;
+            else
+                do_item();
+            render(note);
+        } else if (ch == 's' || ch == 'S') {
             scan_aps();
             snprintf(note, sizeof note, "scan %d", nap);
-            render(note);
-        } else if (ch == 'a') {
-            auto_on ^= 1;
-            snprintf(note, sizeof note, auto_on ? "auto on" : "auto off");
             render(note);
         } else if (ch == '+' || ch == '=') {
             zoom *= 1.12;
