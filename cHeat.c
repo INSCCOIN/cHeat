@@ -81,6 +81,64 @@ static void clear_fb(uint16_t c)
             px(x, y, c);
 }
 
+static void fill_rect(int x, int y, int w, int h, uint16_t c)
+{
+    int i, j;
+    for (j = 0; j < h; j++)
+        for (i = 0; i < w; i++)
+            px(x + i, y + j, c);
+}
+
+static void hline(int x0, int x1, int y, uint16_t c)
+{
+    if (x0 > x1) {
+        int t = x0;
+        x0 = x1;
+        x1 = t;
+    }
+    for (; x0 <= x1; x0++)
+        px(x0, y, c);
+}
+
+static void tri(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c)
+{
+    int xs[3] = {x0, x1, x2}, ys[3] = {y0, y1, y2}, i, j;
+    for (i = 0; i < 2; i++)
+        for (j = i + 1; j < 3; j++)
+            if (ys[j] < ys[i]) {
+                int t = ys[i];
+                ys[i] = ys[j];
+                ys[j] = t;
+                t = xs[i];
+                xs[i] = xs[j];
+                xs[j] = t;
+            }
+    if (ys[2] == ys[0])
+        return;
+    for (i = ys[0]; i <= ys[2]; i++) {
+        int xa, xb;
+        if (i <= ys[1] && ys[1] != ys[0])
+            xa = xs[0] + (xs[1] - xs[0]) * (i - ys[0]) / (ys[1] - ys[0]);
+        else if (ys[2] != ys[1])
+            xa = xs[1] + (xs[2] - xs[1]) * (i - ys[1]) / (ys[2] - ys[1]);
+        else
+            xa = xs[1];
+        xb = xs[0] + (xs[2] - xs[0]) * (i - ys[0]) / (ys[2] - ys[0]);
+        hline(xa, xb, i, c);
+    }
+}
+
+static uint16_t shade(uint16_t c, int pct)
+{
+    int r = ((c >> 11) & 0x1f) << 3;
+    int g = ((c >> 5) & 0x3f) << 2;
+    int b = (c & 0x1f) << 3;
+    r = r * pct / 100;
+    g = g * pct / 100;
+    b = b * pct / 100;
+    return rgb565(r, g, b);
+}
+
 static void line(int x0, int y0, int x1, int y1, uint16_t c)
 {
     int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
@@ -154,7 +212,7 @@ static void text(int x, int y, const char *s, uint16_t c)
     }
 }
 
-static int project(double x, double y, double z, int *sx, int *sy)
+static int project(double x, double y, double z, int *sx, int *sy, double *dep)
 {
     double cy = cos(yaw), syw = sin(yaw), cp = cos(pitch), sp = sin(pitch);
     double x1 = x * cy - y * syw;
@@ -169,14 +227,16 @@ static int project(double x, double y, double z, int *sx, int *sy)
         return 0;
     f = zoom / f;
     *sx = (int)(W * 0.50 + x1 * f);
-    *sy = (int)(H * 0.58 - y2 * f);
+    *sy = (int)(H * 0.52 - y2 * f);
+    if (dep)
+        *dep = z2;
     return 1;
 }
 
 static void edge(double x0, double y0, double z0, double x1, double y1, double z1, uint16_t c)
 {
     int a, b, d, e;
-    if (project(x0, y0, z0, &a, &b) && project(x1, y1, z1, &d, &e))
+    if (project(x0, y0, z0, &a, &b, NULL) && project(x1, y1, z1, &d, &e, NULL))
         line(a, b, d, e, c);
 }
 
@@ -267,47 +327,140 @@ static double chan_x(int ch)
     return 2.6 + ((ch - 36) / 20.0) * 0.15;
 }
 
+static int proj4(double X[4], double Y[4], double Z[4], int sx[4], int sy[4], double *dep)
+{
+    int k;
+    double d, sum = 0;
+    for (k = 0; k < 4; k++) {
+        if (!project(X[k], Y[k], Z[k], &sx[k], &sy[k], &d))
+            return 0;
+        sum += d;
+    }
+    if (dep)
+        *dep = sum * 0.25;
+    return 1;
+}
+
+static void quadf(int sx[4], int sy[4], uint16_t c)
+{
+    tri(sx[0], sy[0], sx[1], sy[1], sx[2], sy[2], c);
+    tri(sx[0], sy[0], sx[2], sy[2], sx[3], sy[3], c);
+}
+
 static void bar3(double x, double y, double h, uint16_t c)
 {
-    double r = 0.10;
-    edge(x - r, y - r, 0, x - r, y - r, h, c);
-    edge(x + r, y - r, 0, x + r, y - r, h, c);
-    edge(x - r, y + r, 0, x - r, y + r, h, c);
-    edge(x + r, y + r, 0, x + r, y + r, h, c);
-    edge(x - r, y - r, h, x + r, y - r, h, c);
-    edge(x + r, y - r, h, x + r, y + r, h, c);
-    edge(x + r, y + r, h, x - r, y + r, h, c);
-    edge(x - r, y + r, h, x - r, y - r, h, c);
-    edge(x, y, 0, x, y, h, c);
+    double r = 0.13;
+    double X[4], Y[4], Z[4];
+    int sx[4], sy[4];
+    /* top */
+    X[0] = x - r; Y[0] = y - r; Z[0] = h;
+    X[1] = x + r; Y[1] = y - r; Z[1] = h;
+    X[2] = x + r; Y[2] = y + r; Z[2] = h;
+    X[3] = x - r; Y[3] = y + r; Z[3] = h;
+    if (proj4(X, Y, Z, sx, sy, NULL))
+        quadf(sx, sy, shade(c, 100));
+    /* +Y face */
+    X[0] = x - r; Y[0] = y + r; Z[0] = 0;
+    X[1] = x + r; Y[1] = y + r; Z[1] = 0;
+    X[2] = x + r; Y[2] = y + r; Z[2] = h;
+    X[3] = x - r; Y[3] = y + r; Z[3] = h;
+    if (proj4(X, Y, Z, sx, sy, NULL))
+        quadf(sx, sy, shade(c, 70));
+    /* +X face */
+    X[0] = x + r; Y[0] = y - r; Z[0] = 0;
+    X[1] = x + r; Y[1] = y + r; Z[1] = 0;
+    X[2] = x + r; Y[2] = y + r; Z[2] = h;
+    X[3] = x + r; Y[3] = y - r; Z[3] = h;
+    if (proj4(X, Y, Z, sx, sy, NULL))
+        quadf(sx, sy, shade(c, 55));
+    edge(x - r, y - r, h, x + r, y - r, h, shade(c, 40));
+    edge(x + r, y - r, h, x + r, y + r, h, shade(c, 40));
+}
+
+typedef struct {
+    int i;
+    double d;
+} Ord;
+
+static int cmp_ord(const void *a, const void *b)
+{
+    const Ord *x = a, *y = b;
+    if (x->d < y->d)
+        return -1;
+    if (x->d > y->d)
+        return 1;
+    return 0;
 }
 
 static void render(const char *note)
 {
-    int i;
-    char bar[80];
+    int i, k;
+    char line[80];
+    Ord ord[MAXAP];
     clear_fb(C_BG);
-    /* floor */
-    for (i = -4; i <= 4; i++) {
-        edge(-3.2, i * 0.4, 0, 3.6, i * 0.4, 0, C_AXIS);
-        edge(i * 0.45, -2.0, 0, i * 0.45, 2.0, 0, C_AXIS);
+    fill_rect(0, 0, (int)W, 14, C_DIM);
+    fill_rect(0, (int)H - 30, (int)W, 30, C_DIM);
+
+    for (i = -3; i <= 3; i++)
+        edge(-2.8, i * 0.45, 0, 3.2, i * 0.45, 0, C_AXIS);
+    for (k = 1; k <= 13; k += 2) {
+        double x = chan_x(k);
+        int sx, sy;
+        edge(x, -1.8, 0, x, 1.8, 0, C_AXIS);
+        if (project(x, -1.95, 0, &sx, &sy, NULL)) {
+            char n[4];
+            snprintf(n, sizeof n, "%d", k);
+            text(sx - 3, sy, n, C_AXIS);
+        }
     }
-    edge(-3.2, 0, 0, 3.6, 0, 0, C_HI);
-    edge(0, -2.0, 0, 0, 2.0, 0, C_HI);
-    edge(0, 0, 0, 0, 0, 2.2, C_HI);
+    edge(-2.8, 0, 0, 3.2, 0, 0, C_HI);
+    edge(0, -1.8, 0, 0, 1.8, 0, C_HI);
+
     for (i = 0; i < nap; i++) {
         double x = chan_x(aps[i].chan);
-        double y = sin(aps[i].ang) * 1.6;
-        double z = (aps[i].sig + 95) / 40.0;
-        if (z < 0.08)
-            z = 0.08;
-        if (z > 2.4)
-            z = 2.4;
-        bar3(x, y, z, heat(aps[i].sig));
+        double y = sin(aps[i].ang) * 1.5;
+        double z = (aps[i].sig + 95) / 42.0;
+        int sx, sy;
+        if (z < 0.10)
+            z = 0.10;
+        if (z > 2.2)
+            z = 2.2;
+        if (!project(x, y, z, &sx, &sy, &ord[i].d))
+            ord[i].d = -99;
+        ord[i].i = i;
     }
-    text(2, 3, "cHeat", C_HI);
-    snprintf(bar, sizeof bar, "%d ap  ch->x  dir~bssid  h=rssi", nap);
-    text(2, (int)H - 16, bar, C_TXT);
-    text(2, (int)H - 8, note, C_TXT);
+    qsort(ord, (size_t)nap, sizeof(Ord), cmp_ord);
+    for (k = 0; k < nap; k++) {
+        i = ord[k].i;
+        {
+            double x = chan_x(aps[i].chan);
+            double y = sin(aps[i].ang) * 1.5;
+            double z = (aps[i].sig + 95) / 42.0;
+            if (z < 0.10)
+                z = 0.10;
+            if (z > 2.2)
+                z = 2.2;
+            bar3(x, y, z, heat(aps[i].sig));
+        }
+    }
+
+    text(4, 4, "cHeat", C_HI);
+    snprintf(line, sizeof line, "%d AP", nap);
+    text((int)W - 6 * (int)strlen(line) - 6, 4, line, C_TXT);
+    /* legend */
+    for (i = 0; i < 8; i++)
+        fill_rect(80 + i * 10, 4, 9, 6, heat(-90 + i * 8));
+    text(80, 4, "", C_TXT);
+
+    text(4, (int)H - 26, note, C_TXT);
+    for (i = 0; i < nap && i < 3; i++) {
+        snprintf(line, sizeof line, "%d %-10.10s %+ddB ch%d", i + 1, aps[i].ssid, aps[i].sig, aps[i].chan);
+        text(4 + (i % 1) * 0, (int)H - 18 + i * 8, line, heat(aps[i].sig));
+        if (i >= 2)
+            break;
+    }
+    if (nap > 3)
+        ; /* top 3 only in footer */
 }
 
 static void raw(int on)
